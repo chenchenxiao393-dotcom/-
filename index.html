@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>2026 新年倒计时交互</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Microsoft YaHei', sans-serif; }
+        #video_container {
+            position: absolute; bottom: 20px; right: 20px; width: 160px; height: 120px;
+            border: 2px solid rgba(0, 255, 255, 0.4); border-radius: 10px; overflow: hidden; z-index: 100; transform: scaleX(-1);
+        }
+        #input_video { width: 100%; height: 100%; object-fit: cover; }
+        #wish-top-bar {
+            position: absolute; top: 40px; width: 100%; display: flex; 
+            justify-content: center; flex-wrap: wrap; z-index: 20; gap: 20px;
+        }
+        .settled-wish {
+            color: #FFD700; font-weight: bold; font-size: 24px;
+            text-shadow: 0 0 10px #FF4500; opacity: 0.9;
+        }
+        .wish-center {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(0);
+            color: #FFD700; font-weight: bold; font-size: 100px; opacity: 0;
+            text-shadow: 0 0 30px #FF4500; z-index: 50; pointer-events: none;
+            transition: all 0.8s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            white-space: nowrap;
+        }
+        .wish-center.active { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+        .wish-center.fly-up { transform: translate(-50%, -45vh) scale(0.3); opacity: 0; }
+    </style>
+</head>
+<body>
+ 
+    <div id="video_container"><video id="input_video"></video></div>
+
+    <!-- 音乐模块：上传 / URL + 播放/暂停 -->
+    <div id="audio-controls" style="position:fixed;left:20px;bottom:20px;z-index:120; color:#fff;font-size:12px; display:flex; align-items:center; gap:8px;">
+        <label style="display:inline-block;margin-right:4px;">加载背景音乐:</label>
+        <input id="music-file" type="file" accept="audio/*" style="vertical-align:middle;" />
+        <input id="music-url" type="text" placeholder="或粘贴音乐 URL 并回车" style="width:260px;vertical-align:middle;" />
+        <button id="music-play-toggle" disabled style="padding:6px 10px;border-radius:6px;border:none;background:#ff8c00;color:#111;font-weight:bold;cursor:pointer;">播放</button>
+        <span id="music-label" style="opacity:0.9;font-size:12px;color:#fff;min-width:140px;display:inline-block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
+    </div>
+    <audio id="bg-music" preload="none"></audio>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.152.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/20.0.0/tween.umd.js"></script>
+
+    <script>
+        let scene, camera, renderer, particles, geometry;
+        let photoMesh = null;
+        let photoLoadedCount = 0;
+        const P_COUNT = 25000;
+        let currentGesture = "";
+        let isLocked = false; // 交互锁定开关
+        const wishes = ["再见2025","你好2026", "新年快乐", "辞旧迎新", "前程似锦", "平安喜乐", "岁岁平安", "身体健康", "发财暴富","马上幸福", "2026大吉", "HAPPY NEW YEAR!"];
+        let wishIndex = 0;
+        let photoMeshes = [];
+        const PHOTO_COUNT = 30; // 可根据实际图片数量调整，20~50之间
+
+        // --- 使用 Canvas 采样获取完美的数字坐标 ---
+        function getTextPoints(text) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 200; canvas.height = 200;
+            ctx.fillStyle = 'white';
+            ctx.font = 'bold 160px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, 100, 100);
+
+            const imgData = ctx.getImageData(0, 0, 200, 200).data;
+            const tempPoints = [];
+            for (let y = 0; y < 200; y += 1) {
+                for (let x = 0; x < 200; x += 1) {
+                    if (imgData[(y * 200 + x) * 4] > 128) {
+                        tempPoints.push({ x: (x - 100) / 15, y: (100 - y) / 15 });
+                    }
+                }
+            }
+
+            const points = new Float32Array(P_COUNT * 3);
+            for (let i = 0; i < P_COUNT; i++) {
+                const target = tempPoints[i % tempPoints.length];
+                points[i * 3] = target.x + (Math.random() - 0.5) * 0.1;
+                points[i * 3 + 1] = target.y + (Math.random() - 0.5) * 0.1;
+                points[i * 3 + 2] = (Math.random() - 0.5) * 0.2;
+            }
+            return points;
+        }
+
+        function getShapePoints(type) {
+            if (type === '3' || type === '2' || type === '1') return getTextPoints(type);
+            
+            const points = new Float32Array(P_COUNT * 3);
+            for (let i = 0; i < P_COUNT; i++) {
+                if (type === 'FIST') {
+                    const phi = Math.acos(-1 + (2 * i) / P_COUNT);
+                    const theta = Math.sqrt(P_COUNT * Math.PI) * phi;
+                    points[i * 3] = Math.cos(theta) * Math.sin(phi) * 2;
+                    points[i * 3 + 1] = Math.sin(theta) * Math.sin(phi) * 2;
+                    points[i * 3 + 2] = Math.cos(phi) * 2;
+                } else if (type === 'OPEN') {
+                    const r = Math.random() * 35;
+                    const a1 = Math.random() * Math.PI * 2;
+                    const a2 = Math.random() * Math.PI;
+                    points[i * 3] = r * Math.sin(a2) * Math.cos(a1);
+                    points[i * 3 + 1] = r * Math.sin(a2) * Math.sin(a1);
+                    points[i * 3 + 2] = r * Math.cos(a2);
+                }
+            }
+            return points;
+        }
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+            camera.position.z = 20;
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P_COUNT * 3), 3));
+            const material = new THREE.PointsMaterial({ color: 0xFFD700, size: 0.05, blending: THREE.AdditiveBlending, transparent: true });
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+
+            // 批量加载照片
+            for (let i = 1; i <= PHOTO_COUNT; i++) {
+                const loader = new THREE.TextureLoader();
+                loader.load(`docs/photo${i}.jpg`, function(texture) {
+                    const aspect = texture.image.width / texture.image.height;
+                    const planeHeight = 3; // 更小的适中高度
+                    const planeWidth = planeHeight * aspect;
+                    const photoGeometry = new THREE.PlaneGeometry(planeWidth, planeHeight);
+                    const photoMaterial = new THREE.MeshBasicMaterial({ map: texture, transparent: true, opacity: 1, side: THREE.DoubleSide, depthTest: false });
+                    const mesh = new THREE.Mesh(photoGeometry, photoMaterial);
+                    // 分散分布在更大空间，避开中心区域
+                    let pos;
+                    do {
+                        pos = [
+                            (Math.random() - 0.5) * 36,
+                            (Math.random() - 0.5) * 20,
+                            (Math.random() - 0.5) * 36
+                        ];
+                    } while (Math.sqrt(pos[0]*pos[0] + pos[1]*pos[1] + pos[2]*pos[2]) < 6);
+                    mesh.position.set(pos[0], pos[1], pos[2]);
+                    mesh.visible = false;
+                    mesh.renderOrder = 9999;
+                    scene.add(mesh);
+                    photoMeshes.push(mesh);
+                    photoLoadedCount++;
+                }, undefined, function(err){
+                    // 忽略加载失败的图片
+                });
+            }
+
+            animate();
+        }
+
+        function transformTo(type) {
+            if (isLocked || currentGesture === type) return;
+            currentGesture = type;
+
+            const newPos = getShapePoints(type);
+            new TWEEN.Tween(geometry.attributes.position.array)
+                .to(newPos, 1000).easing(TWEEN.Easing.Quintic.Out)
+                .onUpdate(() => geometry.attributes.position.needsUpdate = true)
+                .start();
+            
+            if (type === 'OPEN') {
+                isLocked = true; // 触发后立即锁定交互
+                particles.material.color.set(0xffaa00);
+                // 显示所有已加载的照片
+                photoMeshes.forEach(mesh => {
+                    mesh.visible = true;
+                    // 分散分布在更大空间，避开中心区域
+                    let pos;
+                    do {
+                        pos = [
+                            (Math.random() - 0.5) * 36,
+                            (Math.random() - 0.5) * 20,
+                            (Math.random() - 0.5) * 36
+                        ];
+                    } while (Math.sqrt(pos[0]*pos[0] + pos[1]*pos[1] + pos[2]*pos[2]) < 6);
+                    mesh.position.set(pos[0], pos[1], pos[2]);
+                    mesh.rotation.set(0, 0, 0);
+                });
+                startWishCycle();
+            } else {
+                if (type === 'FIST') {
+                    particles.material.color.set(0x00ffff);
+                }
+                photoMeshes.forEach(mesh => mesh.visible = false);
+            }
+        }
+
+        function startWishCycle() {
+            if (wishIndex >= wishes.length) return;
+            const wishEl = document.createElement('div');
+            wishEl.className = 'wish-center';
+            wishEl.innerText = wishes[wishIndex];
+            document.body.appendChild(wishEl);
+
+            setTimeout(() => wishEl.classList.add('active'), 100);
+
+            setTimeout(() => {
+                wishEl.classList.add('fly-up');
+                setTimeout(() => {
+                    const topBar = document.getElementById('wish-top-bar');
+                    const settled = document.createElement('div');
+                    settled.className = 'settled-wish';
+                    settled.innerText = wishes[wishIndex-1];
+                    topBar.appendChild(settled);
+                    wishEl.remove();
+                }, 800);
+                wishIndex++;
+                setTimeout(startWishCycle, 500);
+            }, 5000); // 祝福语展示5秒
+        }
+
+        function animate(time) {
+            requestAnimationFrame(animate);
+            TWEEN.update(time);
+            if (isLocked) {
+                particles.rotation.y += 0.0015;
+                photoMeshes.forEach(mesh => {
+                    if (mesh.visible) {
+                        mesh.position.applyAxisAngle(new THREE.Vector3(0,1,0), 0.0015);
+                        mesh.rotation.y += 0.0015;
+                    }
+                });
+            }
+            renderer.render(scene, camera);
+        }
+
+        function onResults(results) {
+            if (isLocked || !results.multiHandLandmarks || results.multiHandLandmarks.length === 0) return;
+            const lm = results.multiHandLandmarks[0];
+            const fingers = [8, 12, 16, 20].filter(id => lm[id].y < lm[id-2].y).length;
+
+            if (fingers === 3) transformTo('3');
+            else if (fingers === 2) transformTo('2');
+            else if (fingers === 1) transformTo('1');
+            else if (fingers === 0) transformTo('FIST');
+            else if (fingers >= 4 && currentGesture === 'FIST') transformTo('OPEN');
+        }
+
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.8 });
+        hands.onResults(onResults);
+        const cameraUtils = new Camera(document.getElementById('input_video'), {
+            onFrame: async () => await hands.send({image: document.getElementById('input_video')}),
+            width: 640, height: 480
+        });
+        // --- 音乐控件逻辑 ---
+        (function setupMusicControls(){
+            const musicFileInput = document.getElementById('music-file');
+            const musicUrlInput = document.getElementById('music-url');
+            const playToggle = document.getElementById('music-play-toggle');
+            const musicLabelSpan = document.getElementById('music-label');
+            const bgMusicEl = document.getElementById('bg-music');
+
+            function updateMusicLabel(text){ musicLabelSpan.textContent = text || ''; }
+
+            // 恢复本地存储的音乐URL和标签
+            const saved = localStorage.getItem('bgMusicInfo');
+            if (saved) {
+                try {
+                    const {src, label} = JSON.parse(saved);
+                    if (src && /^https?:\/\//.test(src)) {
+                        bgMusicEl.src = src; bgMusicEl.loop = true; bgMusicEl.load();
+                        playToggle.disabled = false; playToggle.textContent = '播放';
+                        updateMusicLabel(label);
+                        musicUrlInput.value = src;
+                    }
+                } catch(e){}
+            }
+
+            musicFileInput.addEventListener('change', (ev) => {
+                const f = ev.target.files[0]; if (!f) return;
+                const url = URL.createObjectURL(f);
+                bgMusicEl.src = url; bgMusicEl.loop = true; bgMusicEl.load();
+                playToggle.disabled = false; playToggle.textContent = '播放';
+                updateMusicLabel(f.name);
+            });
+
+            musicUrlInput.addEventListener('keydown', (ev) => {
+                if (ev.key === 'Enter'){
+                    const v = ev.target.value.trim(); if (!v) return;
+                    bgMusicEl.src = v; bgMusicEl.loop = true; bgMusicEl.load();
+                    playToggle.disabled = false; playToggle.textContent = '播放';
+                    updateMusicLabel(v);
+                }
+            });
+
+            playToggle.addEventListener('click', () => {
+                if (!bgMusicEl.src) return;
+                if (bgMusicEl.paused) {
+                    bgMusicEl.play().then(()=> playToggle.textContent = '暂停').catch(e=>console.warn('play failed', e));
+                } else {
+                    bgMusicEl.pause(); playToggle.textContent = '播放';
+                }
+            });
+
+            bgMusicEl.addEventListener('play', ()=> playToggle.textContent = '暂停');
+            bgMusicEl.addEventListener('pause', ()=> playToggle.textContent = '播放');
+        })();
+
+        init(); cameraUtils.start();
+    </script>
+</body>
+</html>
